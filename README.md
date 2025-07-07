@@ -2,14 +2,15 @@
 
 > **LoongX: Neural-Driven Image Editing**
 
-<!-- [**🌐 Homepage**](https://github.com/LanceZPF/loongx) ｜ [**🤗 Data**](https://github.com/LanceZPF/loongx) | [**📖 Paper**](https://github.com/LanceZPF/loongx) ｜ [**🚀 Quickstart**](#🚀-Quick-Start) | [**🖊️ Citation**](https://github.com/LanceZPF/OpenING?tab=readme-ov-file#%EF%B8%8F-citation) -->
+[**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**🤗 Data**](https://LoongX1.github.io/) | [**📖 Paper**](https://arxiv.org/search/?query=loongx&searchtype=all) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) | [**🖊️ Citation**](https://github.com/LanceZPF/loongx#-citation)
 
 This repository is the official implementation of the paper [Neural-Driven Image Editing](https://github.com/LanceZPF/loongx).
 
 ## 💡 News
 
+- `2025/07/08`: The homepage has been launched and will be continuously updated. Stay tuned!
 - `2025/07/07`: The homepage, demo and data are coming soon one by one. Stay tuned!
-- `2025/07/06`: The paper is uploading to the arxiv...
+- `2025/07/06`: The paper is being uploaded to arXiv...
 
 ## 📖 Introduction
 
@@ -46,3 +47,6 @@ For inference, please refer to `inference.sh`. You need to modify the input and 
 For evaluation, please refer to `test.sh`. You need to modify the input and output paths in the script.
 
 
+## 🖊️ Citation
+
+> **Coming soon. Please check back after the paper is available on arXiv.**
