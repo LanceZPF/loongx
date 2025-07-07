@@ -2,7 +2,7 @@
 
 > **LoongX: Neural-Driven Image Editing**
 
-[**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**📖 Paper**](https://arxiv.org/search/?query=loongx&searchtype=all) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) | [**🖊️ Citation**](https://github.com/LanceZPF/loongx#-citation)
+[**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**📖 Paper**](https://arxiv.org/search/?query=loongx&searchtype=all) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) | [**🖊️ Citation**](https://github.com/LanceZPF/loongx#%EF%B8%8F-citation)
 
 This repository is the official implementation of the paper [Neural-Driven Image Editing](https://github.com/LanceZPF/loongx).
 
