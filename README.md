@@ -2,15 +2,16 @@
 
 > **LoongX: Neural-Driven Image Editing**
 
-[**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**📖 Paper**](https://arxiv.org/search/?query=loongx&searchtype=all) ｜ [**🤗 Data**](https://LoongX1.github.io/) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) ｜ [**🖊️ Citation**](https://github.com/LanceZPF/loongx#%EF%B8%8F-citation)
+[**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**📖 Paper**](https://arxiv.org/abs/2507.05397) ｜ [**🤗 Data**](https://LoongX1.github.io/) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) ｜ [**🖊️ Citation**](https://github.com/LanceZPF/loongx#%EF%B8%8F-citation)
 
-This repository is the official implementation of the paper [Neural-Driven Image Editing](https://github.com/LanceZPF/loongx).
+This repository is the official implementation of the paper [Neural-Driven Image Editing](https://arxiv.org/abs/2507.05397).
 
 ## 💡 News
 
-- `2025/07/08`: The homepage has been launched and will be continuously updated. Stay tuned!
-- `2025/07/07`: The homepage, demo and data are coming soon one by one. Stay tuned!
-- `2025/07/06`: The paper is being uploaded to arXiv...
+- `2026/02/09`: The L-Mind dataset has been released at [Hugging Face](https://huggingface.co/datasets/Lance1573/L-Mind).
+- `2025/07/08`: The homepage has been launched and will be continuously updated at [LoongX](https://LoongX1.github.io/).
+- `2025/07/07`: The homepage, dataset and demo will be released one by one. Stay tuned!
+- `2025/07/06`: The paper is uploaded to [arXiv](https://arxiv.org/abs/2507.05397).
 
 ## 📖 Introduction
 
@@ -49,4 +50,11 @@ For evaluation, please refer to `test.sh`. You need to modify the input and outp
 
 ## 🖊️ Citation
 
-> **Coming soon. Please check back after the paper is available on arXiv.**
+
+```bibtex
+@inproceedings{zhouneural,
+  title={Neural-Driven Image Editing},
+  author={Zhou, Pengfei and Xia, Jie and Peng, Xiaopeng and Zhao, Wangbo and Ye, Zilong and Li, Zekai and Yang, Suorong and Pan, Jiadong and Chen, Yuanxiang and Wang, Ziqiao and others},
+  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems}
+}
+```

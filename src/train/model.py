@@ -4,12 +4,373 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model_state_dict
 import torch.nn.functional as F
-import os
+
 import prodigyopt
 
 from ..flux.transformer import tranformer_forward
 from ..flux.condition import Condition
 from ..flux.pipeline_tools import encode_images, prepare_text_input
+
+from s4torch import S4Model
+
+class EEGEncoder(nn.Module):
+    def __init__(
+        self,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+
+        self.eeg_fixed_length = 4096
+        
+        # S4 models for sequence modeling
+        d_input1 = 4
+        d_model1 = 64
+        n_blocks1 = 2
+        l_max1 = self.eeg_fixed_length
+        self.s41 = S4Model(
+            d_input1,
+            d_model=d_model1,
+            d_output=d_model1,
+            n_blocks=n_blocks1,
+            n=d_model1,
+            l_max=l_max1 or 100
+        ).to(device)
+
+        self.pool1 = nn.AdaptiveAvgPool1d(4).to(device).to(dtype)
+
+        d_input2 = 4
+        d_model2 = 4
+        n_blocks2 = 2
+        l_max2 = self.eeg_fixed_length
+        self.s42 = S4Model(
+            d_input2,
+            d_model=d_model2,
+            d_output=d_model2,
+            n_blocks=n_blocks2,
+            n=d_model2,
+            l_max=l_max2 or 100
+        ).to(device)
+
+        self.pool2 = nn.AdaptiveAvgPool1d(64).to(device).to(dtype)
+        
+        # Feature Pyramid Pooling for multi-scale feature extraction
+        self.fpp = FeaturePyramidPooling(output_sizes=[128, 256, 512, 1024, 2048]).to(device).to(dtype)
+        
+        self.projection = torch.nn.Sequential(
+            torch.nn.Flatten(start_dim=1),
+            torch.nn.Linear(4 * 4096, 2048),
+            torch.nn.LayerNorm(2048),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(2048, 4096),
+            torch.nn.LayerNorm(4096),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Unflatten(1, (512, 8)),
+            torch.nn.Linear(8, 4096)
+        ).to(device).to(dtype)
+
+    def forward(self, x):
+        # Apply S4 models and pooling
+        z1 = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z1_float32 = z1.to(torch.float32)
+        z1 = self.s41(z1)
+        # Convert back to original dtype
+        # z1 = z1.to(x.dtype)
+        z1 = z1.permute(0, 2, 1).contiguous()
+        z1 = self.pool1(z1)
+        z1 = z1.permute(0, 2, 1).contiguous()
+
+        z2 = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z2_float32 = z2.to(torch.float32)
+        z2 = self.s42(z2)
+        # Convert back to original dtype
+        # z2 = z2.to(x.dtype)
+        z2 = z2.permute(0, 2, 1).contiguous()
+        z2 = self.pool2(z2)
+
+        # Apply feature pyramid pooling
+        x_fpp = self.fpp(x)
+        
+        # Concatenate features
+        x_combined = torch.cat([z1, x_fpp, z2], dim=-1)
+
+        # Project to final representation
+        x_out = self.projection(x_combined)
+
+        '''
+        # Apply S4 models and pooling
+        z1 = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z1_float32 = z1.to(torch.float32)
+        z1 = self.s41(z1)
+        # Convert back to original dtype
+        # z1 = z1.to(x.dtype)
+        z1 = z1.permute(0, 2, 1).contiguous()
+        z1 = self.pool1(z1)
+        z1 = z1.permute(0, 2, 1).contiguous()
+
+        z2 = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z2_float32 = z2.to(torch.float32)
+        z2 = self.s42(z2)
+        # Convert back to original dtype
+        # z2 = z2.to(x.dtype)
+        z2 = z2.permute(0, 2, 1).contiguous()
+        z2 = self.pool2(z2)
+
+        # Apply feature pyramid pooling
+        x_fpp = self.fpp(x)
+        
+        # Concatenate features
+        x_combined = torch.cat([z1, x_fpp, z2], dim=-1)
+
+        # Project to final representation
+        x_out = self.projection(x_combined)
+        '''
+        return x_out
+
+
+class PPGEncoder(nn.Module):
+    def __init__(
+        self,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        
+        self.ppg_fixed_length = 256
+        
+        # S4 model for PPG signals
+        d_input = 4
+        d_model = 4
+        n_blocks = 2
+        l_max = self.ppg_fixed_length
+        
+        self.s4 = S4Model(
+            d_input,
+            d_model=d_model,
+            d_output=d_model,
+            n_blocks=n_blocks,
+            n=d_model,
+            l_max=l_max or 100
+        ).to(device)  # Set S4Model to float32
+        
+        self.pool = nn.AdaptiveAvgPool1d(16).to(device).to(dtype)
+        
+        # Feature pyramid pooling for multi-scale features
+        self.fpp = FeaturePyramidPooling(output_sizes=[64, 128, 256]).to(device).to(dtype)
+        
+        # Projection layers
+        self.projection = torch.nn.Sequential(
+            torch.nn.Flatten(start_dim=1),
+            torch.nn.Linear(d_model * 16 + 448 * 4, 1024),  # 448 = 64+128+256 from FPP
+            torch.nn.LayerNorm(1024),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(1024, 4096),
+            torch.nn.LayerNorm(4096),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Unflatten(1, (512, 8)),
+            torch.nn.Linear(8, 4096)
+        ).to(device).to(dtype)
+        
+    def forward(self, x):
+        # Apply S4 model
+        z = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z_float32 = z.to(torch.float32)
+        z = self.s4(z)
+        # Convert back to original dtype
+        # z = z.to(x.dtype)
+        z = z.permute(0, 2, 1).contiguous()
+        z = self.pool(z)
+        
+        # Apply feature pyramid pooling
+        x_fpp = self.fpp(x)
+        
+        # Flatten and concatenate
+        z_flat = z.flatten(1)
+        x_fpp_flat = x_fpp.flatten(1)
+        
+        # Concatenate features
+        combined = torch.cat([z_flat, x_fpp_flat], dim=1)
+        
+        # Project to final representation
+        output = self.projection(combined)
+        return output
+
+
+class FNIRSEncoder(nn.Module):
+    def __init__(
+        self,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        
+        self.fnirs_fixed_length = 512
+        
+        # S4 model for fNIRS signals
+        d_input = 6  # Typically fNIRS has 2 channels (HbO and HbR)
+        d_model = 6
+        n_blocks = 2
+        l_max = self.fnirs_fixed_length
+        
+        self.s4 = S4Model(
+            d_input,
+            d_model=d_model,
+            d_output=d_model,
+            n_blocks=n_blocks,
+            n=d_model,
+            l_max=l_max or 100
+        ).to(device)  # Set S4Model to float32
+        
+        self.pool = nn.AdaptiveAvgPool1d(32).to(device).to(dtype)
+        
+        # Feature pyramid pooling
+        self.fpp = FeaturePyramidPooling(output_sizes=[128, 256, 448]).to(device).to(dtype)
+        
+        # Projection layers
+        self.projection = torch.nn.Sequential(
+            torch.nn.Flatten(start_dim=1),
+            torch.nn.Linear(d_model * 32 + 832 * 6, 1024),  # 768 = 128+256+384 from FPP
+            torch.nn.LayerNorm(1024),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(1024, 768),
+            torch.nn.LayerNorm(768),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+        ).to(device).to(dtype)
+        
+    def forward(self, x):
+        # Apply S4 model
+        z = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z_float32 = z.to(torch.float32)
+        z = self.s4(z)
+        # Convert back to original dtype
+        # z = z.to(x.dtype)
+        z = z.permute(0, 2, 1).contiguous()
+        z = self.pool(z)
+        
+        # Apply feature pyramid pooling
+        x_fpp = self.fpp(x)
+        
+        # Flatten and concatenate
+        z_flat = z.flatten(1)
+        x_fpp_flat = x_fpp.flatten(1)
+        
+        # Concatenate features
+        combined = torch.cat([z_flat, x_fpp_flat], dim=1)
+        
+        # Project to final representation
+        output = self.projection(combined)
+        return output
+
+
+class MotionEncoder(nn.Module):
+    def __init__(
+        self,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        
+        self.motion_fixed_length = 128
+        
+        # S4 model for motion signals (typically 6 channels: 3 for accelerometer, 3 for gyroscope)
+        d_input = 6
+        d_model = 6
+        n_blocks = 2
+        l_max = self.motion_fixed_length
+        
+        self.s4 = S4Model(
+            d_input,
+            d_model=d_model,
+            d_output=d_model,
+            n_blocks=n_blocks,
+            n=d_model,
+            l_max=l_max or 100
+        ).to(device)  # Set S4Model to float32
+        
+        self.pool = nn.AdaptiveAvgPool1d(6).to(device).to(dtype)
+        
+        # Feature pyramid pooling
+        self.fpp = FeaturePyramidPooling(output_sizes=[32, 64, 124]).to(device).to(dtype)
+        
+        # Projection layers
+        self.projection = torch.nn.Sequential(
+            torch.nn.Flatten(start_dim=1),
+            torch.nn.Linear(d_model * 6 + 220 * 6, 512),  # 192 = 32+64+96 from FPP
+            torch.nn.LayerNorm(512),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+            torch.nn.Linear(512, 768),
+            torch.nn.LayerNorm(768),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.3),
+        ).to(device).to(dtype)
+
+    def forward(self, x):
+        # Apply S4 model
+        z = x.permute(0, 2, 1).contiguous()
+        # Convert to float32 for S4Model
+        # z_float32 = z.to(torch.float32)
+        z = self.s4(z)
+        # Convert back to original dtype
+        # z = z.to(x.dtype)
+        z = z.permute(0, 2, 1).contiguous()
+        z = self.pool(z)
+        
+        # Apply feature pyramid pooling
+        x_fpp = self.fpp(x)
+        
+        # Flatten and concatenate
+        z_flat = z.flatten(1)
+        x_fpp_flat = x_fpp.flatten(1)
+        
+        # Concatenate features
+        combined = torch.cat([z_flat, x_fpp_flat], dim=1)
+        
+        # Project to final representation
+        output = self.projection(combined)
+        return output
+
+class FeaturePyramidPooling(nn.Module):
+    """
+    Feature Pyramid Pooling module for biosignals.
+    This module applies multiple adaptive average pooling operations with different output sizes
+    to create a multi-scale feature representation.
+    """
+    def __init__(self, output_sizes=[256, 512, 1024]):
+        super(FeaturePyramidPooling, self).__init__()
+        self.output_sizes = output_sizes
+        self.pools = nn.ModuleList([
+            nn.AdaptiveAvgPool1d(size) for size in output_sizes
+        ])
+        
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape [B, C, L] where B is batch size, 
+               C is number of channels, and L is sequence length
+        
+        Returns:
+            Concatenated multi-scale features of shape [B, C, sum(output_sizes)]
+        """
+        # Apply different pooling operations
+        features = []
+        for pool in self.pools:
+            features.append(pool(x))
+        
+        # Concatenate along the sequence dimension
+        return torch.cat(features, dim=-1)
 
 
 class OminiModel(L.LightningModule):
@@ -24,8 +385,7 @@ class OminiModel(L.LightningModule):
         optimizer_config: dict = None,
         gradient_checkpointing: bool = False,
         use_brain_condition: bool = True,
-        fuse_flag: bool = False,
-        load_pretrained_projections: bool = False,
+        fuse_flag: bool = True,
     ):
         # Initialize the LightningModule
         super().__init__()
@@ -50,62 +410,15 @@ class OminiModel(L.LightningModule):
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
 
-        self.to(device).to(dtype)
-
         self.fuse_flag = fuse_flag
         self.use_brain_condition = use_brain_condition
         
         # Target fixed lengths after spatial pyramid pooling
-        self.eeg_fixed_length = 128
-        self.fnirs_fixed_length = 128
-        self.ppg_fixed_length = 16
-        self.motion_fixed_length = 16
-        
-        # EEG projection
-        # EEG projection
-        self.eeg_projection = torch.nn.Sequential(
-            torch.nn.Flatten(1, 1),  # Keep the last dimension, shape becomes [1,4,variable_length]
-            # Apply spatial pyramid pooling to get fixed length
-            # The SPP is implemented in the forward pass
-            torch.nn.Linear(4 * self.eeg_fixed_length, 2048),  # Using fixed length after SPP
-            torch.nn.ReLU(),
-            torch.nn.Linear(2048, 4096),  # Project to intermediate dimension
-            torch.nn.Unflatten(1, (512, 8)),  # Reshape to [1,512,8]
-            # torch.nn.Linear(8, 4096)  # Final projection to target dimension
-        ).to(device).to(dtype)
-        
-        # PPG projection
-        self.ppg_projection = torch.nn.Sequential(
-            torch.nn.Flatten(1, 1),  # Keep the last dimension, shape becomes [1,4,variable_length]
-            # Apply spatial pyramid pooling to get fixed length
-            # The SPP is implemented in the forward pass
-            torch.nn.Linear(4 * self.ppg_fixed_length, 2048),  # Using fixed length after SPP
-            torch.nn.ReLU(),
-            torch.nn.Linear(2048, 4096),  # Project to intermediate dimension
-            torch.nn.Unflatten(1, (512, 8)),  # Reshape to [1,512,8]
-            # torch.nn.Linear(8, 4096)  # Final projection to target dimension
-        ).to(device).to(dtype)
-        
-        # FNIRS projection
-        self.fnirs_projection = torch.nn.Sequential(
-            torch.nn.Flatten(1, 1),  # Keep the last dimension, shape becomes [1,6,variable_length]
-            # Apply spatial pyramid pooling to get fixed length
-            # The SPP is implemented in the forward pass
-            torch.nn.Linear(6 * self.fnirs_fixed_length, 384),  # Using fixed length after SPP
-            torch.nn.ReLU(),
-            torch.nn.Linear(384, 768)  # Project to target dimension
-        ).to(device).to(dtype)
-        
-        # Motion projection
-        self.motion_projection = torch.nn.Sequential(
-            torch.nn.Flatten(1, 1),  # Keep the last dimension, shape becomes [1,6,variable_length]
-            # Apply spatial pyramid pooling to get fixed length
-            # The SPP is implemented in the forward pass
-            torch.nn.Linear(6 * self.motion_fixed_length, 384),  # Using fixed length after SPP
-            torch.nn.ReLU(),
-            torch.nn.Linear(384, 768)  # Project to target dimension
-        ).to(device).to(dtype)
-        
+        self.eeg_fixed_length = 4096
+        self.fnirs_fixed_length = 512
+        self.ppg_fixed_length = 256
+        self.motion_fixed_length = 128
+
         # Fusion layers for EEG and PPG
         # self.fusion1 = torch.nn.Sequential(
         #     torch.nn.Linear(4096 + 768, 4096),
@@ -115,7 +428,7 @@ class OminiModel(L.LightningModule):
         # ).to(device).to(dtype)
 
         self.fusion1 = torch.nn.Sequential(
-            torch.nn.Linear(8+8, 4096),
+            torch.nn.Linear(512*2, 512),
         ).to(device).to(dtype)
 
         # # Fusion layers for FNIRS and Motion
@@ -123,54 +436,30 @@ class OminiModel(L.LightningModule):
             torch.nn.Linear(768 + 768, 768),
         ).to(device).to(dtype)
 
-        self.duan_norm1 = DUAN(channels=8, device=device, dtype=dtype)
+        self.duan_norm1 = DUAN(channels=512, device=device, dtype=dtype)
         self.duan_norm2 = DUAN(channels=1, device=device, dtype=dtype)
-
+        
+        self.fusion3 = torch.nn.Sequential(
+            torch.nn.Linear(512*2, 512),
+        ).to(device).to(dtype)
+        
+        self.fusion4 = torch.nn.Sequential(
+            torch.nn.Linear(768*2, 768),
+        ).to(device).to(dtype)
+        
         # Add DUAN for prompt_embeds fusion
         self.duan_norm_prompt = DUAN(channels=512, device=device, dtype=dtype)
         
         # Add DUAN for pooled_prompt_embeds fusion
         self.duan_norm_pooled = DUAN(channels=1, device=device, dtype=dtype)
 
-        if load_pretrained_projections:
-            self.load_pretrained_projections()
-
-    def load_pretrained_projections(self, 
-                                  eeg_path: str = "pretrained/eeg_projection.pth",
-                                  ppg_path: str = "pretrained/ppg_projection.pth", 
-                                  fnirs_path: str = "pretrained/fnirs_projection.pth",
-                                  motion_path: str = "pretrained/motion_projection.pth"):
-        """
-        Load pretrained weights for projection networks
-        
-        Args:
-            eeg_path (str): Path to EEG projection weights
-            ppg_path (str): Path to PPG projection weights  
-            fnirs_path (str): Path to FNIRS projection weights
-            motion_path (str): Path to motion projection weights
-        """
-        # Load EEG projection weights if path exists
-        if os.path.exists(eeg_path):
-            self.eeg_projection.load_state_dict(torch.load(eeg_path))
-            print(f"Loaded EEG projection weights from {eeg_path}")
-            
-        # Load PPG projection weights if path exists
-        if os.path.exists(ppg_path):
-            self.ppg_projection.load_state_dict(torch.load(ppg_path))
-            print(f"Loaded PPG projection weights from {ppg_path}")
-            
-        # Load FNIRS projection weights if path exists
-        if os.path.exists(fnirs_path):
-            self.fnirs_projection.load_state_dict(torch.load(fnirs_path))
-            print(f"Loaded FNIRS projection weights from {fnirs_path}")
-            
-        # Load motion projection weights if path exists
-        if os.path.exists(motion_path):
-            self.motion_projection.load_state_dict(torch.load(motion_path))
-            print(f"Loaded motion projection weights from {motion_path}")
-            
-        return self
-
+        self.to(device).to(dtype)
+                
+        # Initialize encoders for different biosignals
+        self.eeg_projection = EEGEncoder(device=device, dtype=dtype)
+        self.ppg_projection = PPGEncoder(device=device, dtype=dtype)
+        self.fnirs_projection = FNIRSEncoder(device=device, dtype=dtype)
+        self.motion_projection = MotionEncoder(device=device, dtype=dtype)
 
     def load_lora(self, checkpoint_path: str):
         """
@@ -187,13 +476,14 @@ class OminiModel(L.LightningModule):
         
         return self
 
-    def spatial_pyramid_pooling(self, x, output_size):
+    def spatial_pyramid_pooling(self, x, output_size, adaptive=False):
         """
         Apply spatial pyramid pooling to convert variable length input to fixed length
         
         Args:
             x (torch.Tensor): Input tensor of shape [batch_size, channels, variable_length]
             output_size (int): Desired fixed length after pooling
+            adaptive (bool): Whether to use adaptive pooling or padding/truncation
             
         Returns:
             torch.Tensor: Tensor of shape [batch_size, channels, output_size]
@@ -203,11 +493,21 @@ class OminiModel(L.LightningModule):
         # If input length is already the desired length, return as is
         if length == output_size:
             return x
-            
-        # Calculate adaptive pool sizes to achieve the desired output size
-        # We'll use a simple approach with equal-sized bins
-        result = F.adaptive_avg_pool1d(x, output_size)
         
+        if adaptive:
+            # Calculate adaptive pool sizes to achieve the desired output size
+            # We'll use a simple approach with equal-sized bins
+            result = F.adaptive_avg_pool1d(x, output_size)
+        else:
+            # Use padding approach to handle different input lengths
+            if length < output_size:
+                # Pad with zeros if input is shorter than desired output
+                padding = torch.zeros(batch_size, channels, output_size - length, device=x.device, dtype=x.dtype)
+                result = torch.cat([x, padding], dim=2)
+            else:
+                # Truncate if input is longer than desired output
+                result = x[:, :, :output_size]
+            
         return result
 
     def init_lora(self, lora_path: str, lora_config: dict):
@@ -356,10 +656,10 @@ class OminiModel(L.LightningModule):
         if self.use_brain_condition:
             # Process and fuse EEG and PPG for prompt_embeds
             if eeg is not None:
-                eeg_features = self.eeg_projection(eeg.flatten(1))
+                eeg_features = self.eeg_projection(eeg)
                 
                 if ppg is not None:
-                    ppg_features = self.ppg_projection(ppg.flatten(1))
+                    ppg_features = self.ppg_projection(ppg)
                     # Use fusion function to combine EEG and PPG features
                     prompt_embeds_brain = self.fuse_eeg(eeg_features, ppg_features)
                 else:
@@ -367,19 +667,23 @@ class OminiModel(L.LightningModule):
             
             # Process and fuse FNIRS and Motion for pooled_prompt_embeds
             if fnirs is not None:
-                fnirs_features = self.fnirs_projection(fnirs.flatten(1))
+                fnirs_features = self.fnirs_projection(fnirs)
                 
                 if motion is not None:
-                    motion_features = self.motion_projection(motion.flatten(1))
+                    motion_features = self.motion_projection(motion)
                     # Use fusion function to combine FNIRS and Motion features
                     pooled_prompt_embeds_brain = self.fuse_fnirs(fnirs_features, motion_features)
                 else:
                     pooled_prompt_embeds_brain = fnirs_features
-                    
-            # Fuse speech embeddings with brain embeddings when fuse_flag is True
+            
+            # Fuse original embeddings with brain embeddings when fuse_flag is True
             if self.fuse_flag:
                 # Fuse prompt_embeds with prompt_embeds_brain
-                prompt_embeds_fused = self.duan_norm_prompt(prompt_embeds, prompt_embeds_brain)
+                prompt_embeds_fused = self.duan_norm_prompt(prompt_embeds_brain, prompt_embeds)
+                prompt_embeds_cat = torch.cat([prompt_embeds, prompt_embeds_fused], dim=1)
+                prompt_embeds_cat = prompt_embeds_cat.transpose(1, 2).contiguous()
+                prompt_embeds_cat =  self.fusion3(prompt_embeds_cat)
+                prompt_embeds = prompt_embeds + prompt_embeds_cat.transpose(1, 2).contiguous()
                 
                 # Fuse pooled_prompt_embeds with pooled_prompt_embeds_brain
                 # Reshape for DUAN which expects [B,C,L] format
@@ -387,17 +691,15 @@ class OminiModel(L.LightningModule):
                 pooled_prompt_embeds_brain_reshaped = pooled_prompt_embeds_brain.unsqueeze(1)  # [B,1,D]
                 
                 fused_pooled = self.duan_norm_pooled(
-                    pooled_prompt_embeds_reshaped, 
-                    pooled_prompt_embeds_brain_reshaped
+                    pooled_prompt_embeds_brain_reshaped,
+                    pooled_prompt_embeds_reshaped
                 )
-
-                prompt_embeds = prompt_embeds_fused
-                pooled_prompt_embeds = fused_pooled.squeeze(1)
-
-
+                pooled_prompt_embeds_cat = torch.cat([pooled_prompt_embeds, fused_pooled.squeeze(1)], dim=-1)  # Back to [B,D]
+                pooled_prompt_embeds = pooled_prompt_embeds + self.fusion4(pooled_prompt_embeds_cat)
             else:
                 prompt_embeds = prompt_embeds_brain
                 pooled_prompt_embeds = pooled_prompt_embeds_brain
+        
 
         # Forward pass
         transformer_out = tranformer_forward(
@@ -441,12 +743,14 @@ class OminiModel(L.LightningModule):
         # combined = torch.cat([eeg_features, ppg_features], dim=-1)  
         # fused_features = self.fusion1(combined)
         # fused_features += eeg_features
-        ppg_features = ppg_features.transpose(1, 2)
-        eeg_features = eeg_features.transpose(1, 2)
+        # ppg_features = ppg_features.transpose(1, 2)
+        # eeg_features = eeg_features.transpose(1, 2)
+
         fused_features = self.duan_norm1(ppg_features, eeg_features)
         fused_features = torch.cat([eeg_features, fused_features], dim=1)
-        fused_features = fused_features.transpose(1, 2)
+        fused_features = fused_features.transpose(1, 2).contiguous()
         fused_features = self.fusion1(fused_features)
+        fused_features = fused_features.transpose(1, 2).contiguous()
         
         return fused_features
     
@@ -473,7 +777,172 @@ class OminiModel(L.LightningModule):
         fused_features = fused_features.squeeze(1)
         # fused_features = fnirs_features
         return fused_features
+    def save_custom_weights(self, save_path):
+        """
+        Save only the custom weights (non-Flux weights) to a specified path.
+        This includes LoRA weights, encoders, DUAN modules, and fusion layers.
+        
+        Args:
+            save_path (str): Directory path to save the weights
+        """
+        import os
+        os.makedirs(save_path, exist_ok=True)
+        
+        # Create a state dict with only the custom components
+        custom_state_dict = {}
+        
+        # Save encoder weights if they exist
+        if hasattr(self, 'eeg_encoder'):
+            custom_state_dict['eeg_encoder'] = self.eeg_encoder.state_dict()
+        
+        if hasattr(self, 'ppg_encoder'):
+            custom_state_dict['ppg_encoder'] = self.ppg_encoder.state_dict()
+            
+        if hasattr(self, 'fnirs_encoder'):
+            custom_state_dict['fnirs_encoder'] = self.fnirs_encoder.state_dict()
+            
+        if hasattr(self, 'motion_encoder'):
+            custom_state_dict['motion_encoder'] = self.motion_encoder.state_dict()
+        
+        # Save DUAN modules
+        if hasattr(self, 'duan_norm1'):
+            custom_state_dict['duan_norm1'] = self.duan_norm1.state_dict()
+            
+        if hasattr(self, 'duan_norm2'):
+            custom_state_dict['duan_norm2'] = self.duan_norm2.state_dict()
+            
+        if hasattr(self, 'duan_norm_prompt'):
+            custom_state_dict['duan_norm_prompt'] = self.duan_norm_prompt.state_dict()
+            
+        if hasattr(self, 'duan_norm_pooled'):
+            custom_state_dict['duan_norm_pooled'] = self.duan_norm_pooled.state_dict()
+        
+        # Save fusion layers
+        if hasattr(self, 'fusion1'):
+            custom_state_dict['fusion1'] = self.fusion1.state_dict()
+            
+        if hasattr(self, 'fusion2'):
+            custom_state_dict['fusion2'] = self.fusion2.state_dict()
+            
+        if hasattr(self, 'fusion3'):
+            custom_state_dict['fusion3'] = self.fusion3.state_dict()
+            
+        if hasattr(self, 'fusion4'):
+            custom_state_dict['fusion4'] = self.fusion4.state_dict()
+        
+        # Save projection layers
+        if hasattr(self, 'eeg_projection'):
+            custom_state_dict['eeg_projection'] = self.eeg_projection.state_dict()
+            
+        if hasattr(self, 'ppg_projection'):
+            custom_state_dict['ppg_projection'] = self.ppg_projection.state_dict()
+            
+        if hasattr(self, 'fnirs_projection'):
+            custom_state_dict['fnirs_projection'] = self.fnirs_projection.state_dict()
+            
+        if hasattr(self, 'motion_projection'):
+            custom_state_dict['motion_projection'] = self.motion_projection.state_dict()
+        
+        # Save LoRA weights if they exist
+        if hasattr(self, 'transformer') and hasattr(self.transformer, 'get_lora_state_dict'):
+            lora_state_dict = self.transformer.get_lora_state_dict()
+            if lora_state_dict:
+                custom_state_dict['lora'] = lora_state_dict
+        
+        # Save model configuration for proper loading
+        custom_state_dict['model_config'] = {
+            'use_brain_condition': self.use_brain_condition,
+            'fuse_flag': self.fuse_flag,
+            'dtype': str(self._dtype)
+        }
+        
+        # Save the custom state dict
+        torch.save(custom_state_dict, os.path.join(save_path, 'custom_weights.pt'))
+        print(f"Custom weights saved to {os.path.join(save_path, 'custom_weights.pt')}")
     
+    def load_custom_weights(self, load_path):
+        """
+        Load custom weights (non-Flux weights) from a specified path.
+        
+        Args:
+            load_path (str): Path to the saved weights file
+        """
+        import os
+        weights_path = os.path.join(load_path, 'custom_weights.pt') if os.path.isdir(load_path) else load_path
+        
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Weights file not found at {weights_path}")
+        
+        # Load the state dict
+        custom_state_dict = torch.load(weights_path, map_location=self.device)
+        
+        # Load model configuration if available
+        if 'model_config' in custom_state_dict:
+            config = custom_state_dict['model_config']
+            print(f"Loading model with configuration: {config}")
+        
+        # Load encoder weights if they exist
+        if 'eeg_encoder' in custom_state_dict and hasattr(self, 'eeg_encoder'):
+            self.eeg_encoder.load_state_dict(custom_state_dict['eeg_encoder'])
+            
+        if 'ppg_encoder' in custom_state_dict and hasattr(self, 'ppg_encoder'):
+            self.ppg_encoder.load_state_dict(custom_state_dict['ppg_encoder'])
+            
+        if 'fnirs_encoder' in custom_state_dict and hasattr(self, 'fnirs_encoder'):
+            self.fnirs_encoder.load_state_dict(custom_state_dict['fnirs_encoder'])
+            
+        if 'motion_encoder' in custom_state_dict and hasattr(self, 'motion_encoder'):
+            self.motion_encoder.load_state_dict(custom_state_dict['motion_encoder'])
+        
+        # Load DUAN modules
+        if 'duan_norm1' in custom_state_dict and hasattr(self, 'duan_norm1'):
+            self.duan_norm1.load_state_dict(custom_state_dict['duan_norm1'])
+            
+        if 'duan_norm2' in custom_state_dict and hasattr(self, 'duan_norm2'):
+            self.duan_norm2.load_state_dict(custom_state_dict['duan_norm2'])
+            
+        if 'duan_norm_prompt' in custom_state_dict and hasattr(self, 'duan_norm_prompt'):
+            self.duan_norm_prompt.load_state_dict(custom_state_dict['duan_norm_prompt'])
+            
+        if 'duan_norm_pooled' in custom_state_dict and hasattr(self, 'duan_norm_pooled'):
+            self.duan_norm_pooled.load_state_dict(custom_state_dict['duan_norm_pooled'])
+        
+        # Load fusion layers
+        if 'fusion1' in custom_state_dict and hasattr(self, 'fusion1'):
+            self.fusion1.load_state_dict(custom_state_dict['fusion1'])
+            
+        if 'fusion2' in custom_state_dict and hasattr(self, 'fusion2'):
+            self.fusion2.load_state_dict(custom_state_dict['fusion2'])
+            
+        if 'fusion3' in custom_state_dict and hasattr(self, 'fusion3'):
+            self.fusion3.load_state_dict(custom_state_dict['fusion3'])
+            
+        if 'fusion4' in custom_state_dict and hasattr(self, 'fusion4'):
+            self.fusion4.load_state_dict(custom_state_dict['fusion4'])
+        
+        # Load projection layers
+        if 'eeg_projection' in custom_state_dict and hasattr(self, 'eeg_projection'):
+            self.eeg_projection.load_state_dict(custom_state_dict['eeg_projection'])
+            
+        if 'ppg_projection' in custom_state_dict and hasattr(self, 'ppg_projection'):
+            self.ppg_projection.load_state_dict(custom_state_dict['ppg_projection'])
+            
+        if 'fnirs_projection' in custom_state_dict and hasattr(self, 'fnirs_projection'):
+            self.fnirs_projection.load_state_dict(custom_state_dict['fnirs_projection'])
+            
+        if 'motion_projection' in custom_state_dict and hasattr(self, 'motion_projection'):
+            self.motion_projection.load_state_dict(custom_state_dict['motion_projection'])
+        
+        # Load LoRA weights if they exist
+        if 'lora' in custom_state_dict and hasattr(self, 'transformer'):
+            if hasattr(self.transformer, 'load_lora_state_dict'):
+                self.transformer.load_lora_state_dict(custom_state_dict['lora'])
+            else:
+                print("Warning: Transformer does not have load_lora_state_dict method")
+        
+        print(f"Custom weights loaded successfully from {weights_path}")
+
+
 
 class DUAN(nn.Module):
     """
@@ -489,7 +958,7 @@ class DUAN(nn.Module):
         channels: int,
         hidden_dim: int = 128,
         keep_ratio: float = 0.7,
-        eps: float = 1e-5,
+        eps: float = 1e-3,
         device: str | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -519,10 +988,12 @@ class DUAN(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,  # [B,C,L] 内容特征
-        c: torch.Tensor,  # [B,C,L] 条件特征
+        x16: torch.Tensor,  # [B,C,L] 内容特征
+        c16: torch.Tensor,  # [B,C,L] 条件特征
         keep_ratio: float | None = None,
     ) -> torch.Tensor:
+        x, c = x16.float(), c16.float()
+
         assert x.shape == c.shape, "x, c must have identical shape [B,C,L]"
         B, C, L = x.shape
         if keep_ratio is None:
@@ -561,5 +1032,4 @@ class DUAN(nn.Module):
         mask.scatter_(1, topk, 1.0)                                # [B,C]
         y = y * mask.unsqueeze(2)                                  # [B,C,L]
 
-        return y
-    
+        return y.to(x16.dtype)
