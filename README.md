@@ -8,8 +8,8 @@ This repository is the official implementation of [Neural-Driven Image Editing](
 
 ## 💡 News
 
-- `2026/02/09`: The L-Mind dataset has been released at [Hugging Face](https://huggingface.co/datasets/Lance1573/L-Mind).
-- `2025/07/08`: The homepage has been launched and will be continuously updated at [LoongX](https://LoongX1.github.io/).
+- `2026/02/09`: The L-Mind dataset is released at [Hugging Face](https://huggingface.co/datasets/Lance1573/L-Mind).
+- `2025/07/08`: The homepage is launched and will be continuously updated at [LoongX](https://LoongX1.github.io/).
 - `2025/07/07`: The homepage, dataset and demo will be released one by one. Stay tuned!
 - `2025/07/06`: The paper is uploaded to [arXiv](https://arxiv.org/abs/2507.05397).
 
