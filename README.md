@@ -4,7 +4,7 @@
 
 [**🌐 Homepage**](https://LoongX1.github.io/) ｜ [**📖 Paper**](https://arxiv.org/abs/2507.05397) ｜ [**🤗 Data**](https://LoongX1.github.io/) ｜ [**🚀 Quickstart**](https://github.com/LanceZPF/loongx#-quick-start) ｜ [**🖊️ Citation**](https://github.com/LanceZPF/loongx#%EF%B8%8F-citation)
 
-This repository is the official implementation of the paper [Neural-Driven Image Editing](https://arxiv.org/abs/2507.05397).
+This repository is the official implementation of the paper [Neural-Driven Image Editing](https://arxiv.org/abs/2507.05397) (NeurIPS 2025).
 
 ## 💡 News
 
